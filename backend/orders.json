@@ -1,0 +1,4 @@
+{"drinkType": "Cappuccino", "size": "Large", "milk": "Almond", "extras": ["Sugar"], "name": "Arax Kurosaki"}
+{"drinkType": "Frappuccino", "size": "Medium", "milk": "Oat", "extras": [], "name": "Arun"}
+{"drinkType": "Latte", "size": "Large", "milk": "Whole", "extras": ["Pistachio"], "name": "Arun"}
+{"drinkType": "Americano", "size": "Large", "milk": "Whole", "extras": [], "name": "Arun"}
