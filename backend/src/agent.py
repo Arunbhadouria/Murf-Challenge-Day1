@@ -1,6 +1,8 @@
 import logging
 import json
-from typing import Annotated, List
+import os
+from datetime import datetime
+from typing import Annotated, List, Optional
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -24,62 +26,124 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
+LOG_FILE = "wellness_log.json"
 
-class Assistant(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions="""You are a friendly, upbeat barista at 'Guitarbucks'. 
-            Your goal is to take a complete coffee order from the customer.
+def get_history_context() -> Optional[str]:
+    """
+    Reads the wellness log and returns a summary context of the last entry.
+    Returns None if no file or history exists.
+    """
+    if not os.path.exists(LOG_FILE):
+        return None
+    
+    try:
+        with open(LOG_FILE, "r") as f:
+            content = f.read()
+            if not content:
+                return None
+            data = json.loads(content)
             
-            You must collect specific details to fill the order state. Do not ask for everything at once; be conversational and ask clarifying questions.
-            
-            Required Order Details:
-            1. Drink Type (e.g., Latte, Espresso, Tea)
-            2. Size (Small, Medium, Large)
-            3. Milk Preference (e.g., Oat, Whole, Almond, None)
-            4. Extras (e.g., Vanilla syrup, extra shot, sugar, or "none")
-            5. Customer Name
-            
-            Process:
-            1. Greet the customer warmly.
-            2. Collect the missing details naturally.
-            3. Once all 5 fields are known, summarize the full order clearly to the user for confirmation.
-            4. ONLY after the user confirms the summary is correct, call the `save_order` tool.
-            5. After the tool executes, ask if they want to order another drink. If yes, start fresh.
-            """,
-        )
+            if isinstance(data, list) and len(data) > 0:
+                last_entry = data[-1]
+                # Format timestamp for natural language reference
+                dt = datetime.fromisoformat(last_entry.get("timestamp", datetime.now().isoformat()))
+                date_str = dt.strftime("%B %d")
+                
+                return (
+                    f"Previous Check-in ({date_str}):\n"
+                    f"- Mood: {last_entry.get('mood')}\n"
+                    f"- Energy: {last_entry.get('energy')}\n"
+                    f"- Last Objectives: {', '.join(last_entry.get('objectives', []))}\n"
+                    f"- Summary: {last_entry.get('agent_summary')}"
+                )
+    except Exception as e:
+        logger.error(f"Error reading history: {e}")
+        return None
+    return None
+
+
+class WellnessAssistant(Agent):
+    def __init__(self, history_context: Optional[str] = None) -> None:
+        
+        # Build the dynamic instructions based on history
+        history_instruction = "This is the user's first session."
+        if history_context:
+            history_instruction = (
+                f"CONTEXT FROM LAST SESSION:\n{history_context}\n"
+                "IMPORTANT: When greeting, briefly reference this past entry to show continuity "
+                "(e.g., 'Last time you mentioned feeling tired... how does today compare?')."
+            )
+
+        instructions = f"""
+        You are a supportive, non-clinical Health & Wellness daily check-in companion.
+        Your goal is to conduct a short, warm, and grounded daily check-in with the user.
+        
+        CRITICAL: You are NOT a doctor or therapist. Do not give medical diagnoses or clinical advice.
+        Keep your responses concise, conversational, and optimized for voice (avoid long monologues).
+
+        {history_instruction}
+
+        CHECK-IN FLOW:
+        1. Greet the user warmly. (Reference past context if available).
+        2. Ask about their current Mood and Energy levels.
+        3. Ask about any current stressors or what is on their mind.
+        4. Ask for 1-3 simple objectives or intentions for today (ask if they have any self-care planned).
+        5. Offer EXACTLY ONE short, grounded, non-medical suggestion based on their input (e.g., 'maybe take a 5-minute walk', 'drink water', 'break that task down').
+        6. SUMMARIZE the check-in (Mood, Energy, Objectives) and ask: "Does this sound right?"
+        7. ONLY if the user confirms (Yes), call the `save_checkin` tool immediately.
+        8. If the user disagrees, ask for corrections, then summarize and confirm again.
+        9. After saving, say goodbye warmly.
+        """
+
+        super().__init__(instructions=instructions)
 
     @function_tool
-    async def save_order(
+    async def save_checkin(
         self, 
         context: RunContext, 
-        drink_type: Annotated[str, "The type of drink ordered"],
-        size: Annotated[str, "The size of the drink"],
-        milk: Annotated[str, "The milk preference"],
-        extras: Annotated[List[str], "List of extras or modifications"],
-        name: Annotated[str, "The customer's name"]
+        mood: Annotated[str, "The user's current mood"],
+        energy: Annotated[str, "The user's energy level (text or scale)"],
+        stressors: Annotated[str, "Current stressors or things on the user's mind"],
+        objectives: Annotated[List[str], "List of 1-3 simple objectives/intentions for the day"],
+        agent_summary: Annotated[str, "A brief 1-sentence summary of the check-in generated by you"]
     ):
         """
-        Saves the fully confirmed order to the system.
+        Saves the finalized and confirmed wellness check-in entry to the system.
         """
-        order_data = {
-            "drinkType": drink_type,
-            "size": size,
-            "milk": milk,
-            "extras": extras,
-            "name": name
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "mood": mood,
+            "energy": energy,
+            "stressors": stressors,
+            "objectives": objectives,
+            "agent_summary": agent_summary,
         }
         
-        logger.info(f"Saving order: {order_data}")
+        logger.info(f"Saving check-in: {entry}")
         
         try:
-            # Appending to a JSON lines file
-            with open("orders.json", "a") as f:
-                f.write(json.dumps(order_data) + "\n")
-            return "Order saved successfully. You may now ask if the user wants another drink."
+            # Read existing data to maintain a JSON list
+            data = []
+            if os.path.exists(LOG_FILE):
+                try:
+                    with open(LOG_FILE, "r") as f:
+                        content = f.read()
+                        if content:
+                            data = json.loads(content)
+                            if not isinstance(data, list):
+                                data = []
+                except json.JSONDecodeError:
+                    data = []
+
+            data.append(entry)
+
+            with open(LOG_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+
+            return "Check-in saved successfully. You may now wish the user a good day and end the conversation."
         except Exception as e:
-            logger.error(f"Failed to save order: {e}")
-            return "There was a technical error saving the order."
+            logger.error(f"Failed to save check-in: {e}")
+            return "There was a technical error saving the check-in."
 
 
 def prewarm(proc: JobProcess):
@@ -91,6 +155,9 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
+    # Load history context before starting the agent
+    history_str = get_history_context()
 
     # Set up a voice AI pipeline
     session = AgentSession(
@@ -123,9 +190,9 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
-    # Start the session
+    # Start the session with the modified WellnessAssistant
     await session.start(
-        agent=Assistant(),
+        agent=WellnessAssistant(history_context=history_str),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC(),
